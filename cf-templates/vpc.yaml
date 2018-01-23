@@ -1,0 +1,239 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Stack used for deploying the VPC for a specific environment
+
+Parameters:
+  TeamName:
+    Type: String
+    Default: "codelab"
+  Vertical:
+    Type: String
+  Environment:
+    Type: String
+  CidrVpc:
+    Type: String
+    Default: "172.17.0.0/16"
+  CidrSubnetPublic1:
+    Type: String
+    Default: "172.17.0.0/21"
+  CidrSubnetPublic2:
+    Type: String
+    Default: "172.17.8.0/21"
+  CidrSubnetPublic3:
+    Type: String
+    Default: "172.17.16.0/21"
+
+Resources:
+  ###### VPC ######
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CidrVpc
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'false'
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-IGW"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  ###### Routing tables ######
+
+  ###### Public route table ######
+  RouteTablePublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-RouteTablePublic"
+      - Key: environment
+        Value: !Ref Environment
+      - Key: team
+        Value: !Ref TeamName
+      - Key: vertical
+        Value: !Ref Vertical
+  RoutePublic:
+    DependsOn: [ "InternetGateway" ]
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  ###### SUBNETS ######
+
+  ###### Public Subnets ######
+  SubnetAz1aPublic:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Sub "${CidrSubnetPublic1}"
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-public-1"
+      - Key: environment
+        Value: !Ref Environment
+      - Key: team
+        Value: !Ref TeamName
+      - Key: vertical
+        Value: !Ref Vertical
+  RouteTableAssociationAz1aPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetAz1aPublic
+      RouteTableId: !Ref RouteTablePublic
+
+  # public 1b
+  SubnetAz1bPublic:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Sub "${CidrSubnetPublic2}"
+      AvailabilityZone: !Select [ 1, !GetAZs '']
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-public-2"
+      - Key: environment
+        Value: !Ref Environment
+      - Key: team
+        Value: !Ref TeamName
+      - Key: vertical
+        Value: !Ref Vertical
+  RouteTableAssociationAz1bPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetAz1bPublic
+      RouteTableId: !Ref RouteTablePublic
+
+  # public 1c
+  SubnetAz1cPublic:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: !Sub "${CidrSubnetPublic3}"
+      AvailabilityZone: !Select [ 2, !GetAZs '']
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-public-3"
+      - Key: environment
+        Value: !Ref Environment
+      - Key: team
+        Value: !Ref TeamName
+      - Key: vertical
+        Value: !Ref Vertical
+  RouteTableAssociationAz1cPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetAz1cPublic
+      RouteTableId: !Ref RouteTablePublic
+
+  ###### DNS ZONE ######
+  Route53HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub "${Environment}.${Vertical}.cloud.otto.de"
+
+  ###### Certificate ######
+  Certificate:
+    Type: "AWS::CertificateManager::Certificate"
+    Properties:
+      DomainName: !Sub "*.${Environment}.${Vertical}.cloud.otto.de"
+      DomainValidationOptions:
+        - DomainName: !Sub "*.${Environment}.${Vertical}.cloud.otto.de"
+          ValidationDomain: otto.de
+      Tags:
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+
+Outputs:
+  VPCId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCId"
+  VPCCidr:
+    Value: !Ref CidrVpc
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCCidr"
+  Environment:
+    Value: !Ref Environment
+    Export:
+      Name: !Sub "${AWS::StackName}-Environment"
+
+  Route53HostedZone:
+    Value: !Ref Route53HostedZone
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedZoneId"
+  Route53HostedZoneName:
+    Value: !Sub "${Environment}.${Vertical}.cloud.otto.de"
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedZoneName"
+  Route53HostedZoneNameServers:
+    Value: !Join [",", !GetAtt Route53HostedZone.NameServers]
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedZoneNameServers"
+
+  CertificateId:
+    Value: !Ref Certificate
+    Export:
+      Name: !Sub "${AWS::StackName}-CertificateId"
+
+  RouteTablePublicId:
+    Value: !Ref RouteTablePublic
+    Export:
+      Name: !Sub "${AWS::StackName}-RouteTablePublicId"
+
+  SubnetAllIds:
+    Value: !Join [',', [!Ref SubnetAz1aPublic, !Ref SubnetAz1bPublic, !Ref SubnetAz1cPublic]]
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetAllIds"
+  SubnetPublicIds:
+    Value: !Join [',', [!Ref SubnetAz1aPublic, !Ref SubnetAz1bPublic, !Ref SubnetAz1cPublic]]
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetPublicIds"
+
+  SubnetAz1aPublicId:
+    Value: !Ref SubnetAz1aPublic
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetAz1aPublicId"
+  SubnetAz1bPublicId:
+    Value: !Ref SubnetAz1bPublic
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetAz1bPublicId"
+  SubnetAz1cPublicId:
+    Value: !Ref SubnetAz1cPublic
+    Export:
+      Name: !Sub "${AWS::StackName}-SubnetAz1cPublicId"

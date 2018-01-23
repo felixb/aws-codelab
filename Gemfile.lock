@@ -1,0 +1,28 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    autostacker24 (2.8.1)
+      aws-sdk-cloudformation (~> 1)
+      json (~> 2)
+      json_pure (~> 2)
+    aws-partitions (1.56.0)
+    aws-sdk-cloudformation (1.3.0)
+      aws-sdk-core (~> 3)
+      aws-sigv4 (~> 1.0)
+    aws-sdk-core (3.14.0)
+      aws-partitions (~> 1.0)
+      aws-sigv4 (~> 1.0)
+      jmespath (~> 1.0)
+    aws-sigv4 (1.0.2)
+    jmespath (1.3.1)
+    json (2.1.0)
+    json_pure (2.1.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  autostacker24 (>= 2.8.1)
+
+BUNDLED WITH
+   1.16.0
