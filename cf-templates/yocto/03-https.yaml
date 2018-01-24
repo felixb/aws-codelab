@@ -1,0 +1,237 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys ELB, ASG, Alarms and Dashboards for given service.
+
+Parameters:
+  TeamName:
+    Type: String
+    Default: "codelab"
+  VPCStackName:
+    Type: String
+  Vertical:
+    Type: String
+  Environment:
+    Type: String
+  ServiceName:
+    Type: String
+    Default: yocto
+  BuildVersion:
+    Type: String
+    Default: 1.0.0
+  # Instance settings
+  ImageId:
+    Type: String
+    Default: ami-1b2bb774
+  InstanceType:
+    Type: String
+    Default: "t2.nano"
+  # Autoscaling settings
+  MinSize:
+    Type: Number
+    Default: 1
+  MaxSize:
+    Type: Number
+    Default: 3
+  # Log settings
+  LogRetention:
+    Type: Number
+    Default: "3"
+  # Alarm settings
+  CPUUtilizationHigh:
+    Type: Number
+    Default: "20"
+  CPUUtilizationLow:
+    Type: Number
+    Default: "5"
+  CPUCreditsLow:
+    Type: Number
+    Default: "20"
+
+Resources:
+
+  ###### EC2 instance ######
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow access via http"
+      VpcId: !ImportValue {"Fn::Sub": "${VPCStackName}-VPCId"}
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "8080"
+          ToPort: "8080"
+          CidrIp: !ImportValue {"Fn::Sub": "${VPCStackName}-VPCCidr"}
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}-elb-to-ec2"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+        - Key: service
+          Value: !Ref ServiceName
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref Role
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      UserData:
+        "Fn::Base64": !Sub
+          |
+            #!/bin/bash -xe
+
+            set -o pipefail
+
+            yum install -y docker
+            systemctl enable docker
+            systemctl start docker
+
+            docker run --detach \
+              --net host \
+              felixb/yocto-httpd
+
+            /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+      SecurityGroups:
+        - !Ref SecurityGroup
+
+
+  ###### auto scaling group ######
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT3M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: !Ref MinSize
+        MaxBatchSize: "2"
+        PauseTime: PT3M
+        WaitOnResourceSignals: true
+    DependsOn:
+      - ElasticLoadBalancer
+    Properties:
+      LoadBalancerNames:
+        - !Ref ElasticLoadBalancer
+      VPCZoneIdentifier: !Split [',', !ImportValue {"Fn::Sub": "${VPCStackName}-SubnetPublicIds"}]
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      HealthCheckType: "ELB"
+      HealthCheckGracePeriod: "180"
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}"
+          PropagateAtLaunch: true
+        - Key: environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
+        - Key: team
+          Value: !Ref TeamName
+          PropagateAtLaunch: true
+        - Key: vertical
+          Value: !Ref Vertical
+          PropagateAtLaunch: true
+        - Key: service
+          Value: !Ref ServiceName
+          PropagateAtLaunch: true
+
+  ###############################################################################
+  ### load balancing ############################################################
+  ###############################################################################
+
+  SecurityGroupELB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow access via https"
+      VpcId: !ImportValue {"Fn::Sub": "${VPCStackName}-VPCId"}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}-external-to-elb"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+        - Key: service
+          Value: !Ref ServiceName
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      LoadBalancerName: !Sub "${Vertical}-${Environment}-${ServiceName}"
+      Subnets: !Split [',', !ImportValue {"Fn::Sub": "${VPCStackName}-SubnetPublicIds"}]
+      SecurityGroups:
+        - !Ref SecurityGroupELB
+      ConnectionDrainingPolicy:
+        Enabled: true
+        Timeout: 2
+      CrossZone: true
+      Listeners:
+      - LoadBalancerPort: "443"
+        InstancePort: "8080"
+        Protocol: HTTPS
+        InstanceProtocol: HTTP
+        SSLCertificateId: !ImportValue {"Fn::Sub": "${VPCStackName}-CertificateId"}
+      HealthCheck:
+        Target: !Sub HTTP:8080/${Vertical}-${ServiceName}/internal/health
+        HealthyThreshold: "2"
+        UnhealthyThreshold: "2"
+        Interval: "5"
+        Timeout: "2"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+        - Key: service
+          Value: !Ref ServiceName
+
+  ###############################################################################
+  ### dns #######################################################################
+  ###############################################################################
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue {"Fn::Sub": "${VPCStackName}-HostedZoneId"}
+      Name: !Join [ ".", [ !Ref ServiceName, !ImportValue {"Fn::Sub": "${VPCStackName}-HostedZoneName"} ] ]
+      Type: "A"
+      AliasTarget:
+        HostedZoneId: !GetAtt ElasticLoadBalancer.CanonicalHostedZoneNameID
+        DNSName: !GetAtt ElasticLoadBalancer.DNSName

@@ -4,10 +4,11 @@ set -e
 set -o pipefail
 
 VERTICAL=${1}
-ENVIRONMENT=${2:-"develop"}
+ENVIRONMENT='develop'
+STEP=${2:-'00'}
 
 if [ -z "${VERTICAL}" ]; then
-    echo "usage: ${0} <vertical> [<environment>]"
+    echo "usage: ${0} <vertical> [<step>]"
     exit 1
 fi
 
@@ -19,7 +20,7 @@ fi
 
 bundle exec autostacker24 update \
     --stack "vpc-${VERTICAL}-${ENVIRONMENT}-yocto" \
-    --template "cf-templates/yocto.yaml" \
+    --template cf-templates/yocto/${STEP}-*.yaml \
     --param "Vertical=${VERTICAL}" \
     --param "Environment=${ENVIRONMENT}" \
     --param "VPCStackName=vpc-${VERTICAL}-${ENVIRONMENT}"

@@ -1,0 +1,664 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploys ELB, ASG, Alarms and Dashboards for given service.
+
+Parameters:
+  TeamName:
+    Type: String
+    Default: "codelab"
+  VPCStackName:
+    Type: String
+  Vertical:
+    Type: String
+  Environment:
+    Type: String
+  ServiceName:
+    Type: String
+    Default: yocto
+  BuildVersion:
+    Type: String
+    Default: 1.0.0
+  # Instance settings
+  ImageId:
+    Type: String
+    Default: ami-1b2bb774
+  InstanceType:
+    Type: String
+    Default: "t2.nano"
+  # Autoscaling settings
+  MinSize:
+    Type: Number
+    Default: 1
+  MaxSize:
+    Type: Number
+    Default: 3
+  # Log settings
+  LogRetention:
+    Type: Number
+    Default: "3"
+  # Alarm settings
+  CPUUtilizationHigh:
+    Type: Number
+    Default: "20"
+  CPUUtilizationLow:
+    Type: Number
+    Default: "5"
+  CPUCreditsLow:
+    Type: Number
+    Default: "20"
+
+Resources:
+
+  ###### EC2 instance ######
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow access via http"
+      VpcId: !ImportValue {"Fn::Sub": "${VPCStackName}-VPCId"}
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "8080"
+          ToPort: "8080"
+          CidrIp: !ImportValue {"Fn::Sub": "${VPCStackName}-VPCCidr"}
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}-elb-to-ec2"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+        - Key: service
+          Value: !Ref ServiceName
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: Logging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Sid: WriteLogs
+              Effect: Allow
+              Action:
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource:
+                - "*"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref Role
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      UserData:
+        "Fn::Base64": !Sub
+          |
+            #!/bin/bash -xe
+
+            set -o pipefail
+
+            yum install -y docker
+            systemctl enable docker
+            systemctl start docker
+
+            docker run --detach \
+              --net host \
+              --log-driver=awslogs \
+              --log-opt awslogs-group=${Vertical}-${Environment}-${ServiceName} \
+              --log-opt awslogs-stream=${BuildVersion} \
+              felixb/yocto-httpd
+
+            /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+      SecurityGroups:
+        - !Ref SecurityGroup
+
+
+  ###### auto scaling group ######
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT3M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: !Ref MinSize
+        MaxBatchSize: "2"
+        PauseTime: PT3M
+        WaitOnResourceSignals: true
+    DependsOn:
+      - ElasticLoadBalancer
+    Properties:
+      LoadBalancerNames:
+        - !Ref ElasticLoadBalancer
+      VPCZoneIdentifier: !Split [',', !ImportValue {"Fn::Sub": "${VPCStackName}-SubnetPublicIds"}]
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      HealthCheckType: "ELB"
+      HealthCheckGracePeriod: "180"
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}"
+          PropagateAtLaunch: true
+        - Key: environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
+        - Key: team
+          Value: !Ref TeamName
+          PropagateAtLaunch: true
+        - Key: vertical
+          Value: !Ref Vertical
+          PropagateAtLaunch: true
+        - Key: service
+          Value: !Ref ServiceName
+          PropagateAtLaunch: true
+
+  ###############################################################################
+  ### load balancing ############################################################
+  ###############################################################################
+
+  SecurityGroupELB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow access via https"
+      VpcId: !ImportValue {"Fn::Sub": "${VPCStackName}-VPCId"}
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}-external-to-elb"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+        - Key: service
+          Value: !Ref ServiceName
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      LoadBalancerName: !Sub "${Vertical}-${Environment}-${ServiceName}"
+      Subnets: !Split [',', !ImportValue {"Fn::Sub": "${VPCStackName}-SubnetPublicIds"}]
+      SecurityGroups:
+        - !Ref SecurityGroupELB
+      ConnectionDrainingPolicy:
+        Enabled: true
+        Timeout: 2
+      CrossZone: true
+      Listeners:
+      - LoadBalancerPort: "443"
+        InstancePort: "8080"
+        Protocol: HTTPS
+        InstanceProtocol: HTTP
+        SSLCertificateId: !ImportValue {"Fn::Sub": "${VPCStackName}-CertificateId"}
+      HealthCheck:
+        Target: !Sub HTTP:8080/${Vertical}-${ServiceName}/internal/health
+        HealthyThreshold: "2"
+        UnhealthyThreshold: "2"
+        Interval: "5"
+        Timeout: "2"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Vertical}-${Environment}-${ServiceName}"
+        - Key: environment
+          Value: !Ref Environment
+        - Key: team
+          Value: !Ref TeamName
+        - Key: vertical
+          Value: !Ref Vertical
+        - Key: service
+          Value: !Ref ServiceName
+
+  ###############################################################################
+  ### dns #######################################################################
+  ###############################################################################
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !ImportValue {"Fn::Sub": "${VPCStackName}-HostedZoneId"}
+      Name: !Join [ ".", [ !Ref ServiceName, !ImportValue {"Fn::Sub": "${VPCStackName}-HostedZoneName"} ] ]
+      Type: "A"
+      AliasTarget:
+        HostedZoneId: !GetAtt ElasticLoadBalancer.CanonicalHostedZoneNameID
+        DNSName: !GetAtt ElasticLoadBalancer.DNSName
+
+  ###############################################################################
+  ### logging ###################################################################
+  ###############################################################################
+
+  AppLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      LogGroupName: !Sub "${Vertical}-${Environment}-${ServiceName}"
+      RetentionInDays: !Ref LogRetention
+
+  ###############################################################################
+  ### monitoring ################################################################
+  ###############################################################################
+
+  HealthyHosts:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "Healthy hosts for ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-healthy-hosts"
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: LoadBalancerName
+          Value: !Ref ElasticLoadBalancer
+      EvaluationPeriods: 1
+      MetricName: HealthyHostCount
+      Namespace: AWS/ELB
+      Period: 60
+      Statistic: Maximum
+      Threshold: !Ref MinSize
+      TreatMissingData: breaching
+
+  UnhealthyHosts:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "UnHealthy hosts for ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-unhealthy-hosts"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancerName
+          Value: !Ref ElasticLoadBalancer
+      EvaluationPeriods: 5
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ELB
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  TotalHosts:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "Total hosts for ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-total-hosts"
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      EvaluationPeriods: 1
+      MetricName: GroupTotalInstances
+      Namespace: AWS/AutoScaling
+      Period: 60
+      Statistic: Maximum
+      Threshold: !Ref MaxSize
+      TreatMissingData: notBreaching
+
+  ELB5xx:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "RC 5xx from ELB for ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-ELB-RC-5xx"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancerName
+          Value: !Ref ElasticLoadBalancer
+      EvaluationPeriods: 1
+      MetricName: HTTPCode_ELB_5XX
+      Namespace: AWS/ELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  Backend5xx:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "RC 5xx from Backend for ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-Backend-RC-5xx"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancerName
+          Value: !Ref ElasticLoadBalancer
+      EvaluationPeriods: 1
+      MetricName: HTTPCode_Backend_5XX
+      Namespace: AWS/ELB
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  SurgeQueueLength:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "Surge queue on Loadbalancer for ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-SurgeQueueLength"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancerName
+          Value: !Ref ElasticLoadBalancer
+      EvaluationPeriods: 5
+      MetricName: SurgeQueueLength
+      Namespace: AWS/ELB
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  CPUUtilization:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "CPU utilization ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-CPU-Utilization"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      EvaluationPeriods: 15
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 60
+      Statistic: Maximum
+      Threshold: !Ref CPUUtilizationHigh
+      TreatMissingData: missing
+
+  CPUCreditCriticalBalance:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub "CPU Credit Critical Balance ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-CPU-CreditCriticalBalance"
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      EvaluationPeriods: 1
+      MetricName: CPUCreditBalance
+      Namespace: AWS/EC2
+      Period: 360
+      Statistic: Minimum
+      Threshold: 5
+      TreatMissingData: missing
+
+  ###### dashboard ######
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ServiceName}-${Environment}-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "properties": {
+                "metrics": [
+                  [
+                    "AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "${AutoScalingGroup}", { "color": "#1f77b4", "period": 60, "stat": "Maximum", "label": "CPUUtilization" }
+                  ],
+                  [
+                    ".", "CPUCreditBalance", ".", ".", { "yAxis": "right", "color": "#ff7f0e", "period": 300, "stat": "Minimum", "label": "CPUCreditBalance Minimum" }
+                  ],
+                  [
+                    "...", { "yAxis": "right", "period": 300, "stat": "Average", "label": "CPUCreditBalance Average" }
+                  ]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "title": "EC2 CPU-Utilization/-CreditBalance",
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  },
+                  "right": {
+                    "min": 0
+                  }
+                },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "label": "CPUUtilization high",
+                      "color": "#1f77b4",
+                      "value": ${CPUUtilizationHigh}
+                    },
+                    {
+                      "label": "CPUUtilization low",
+                      "color": "#1f77b4",
+                      "value": ${CPUUtilizationLow}
+                    },
+                    {
+                      "yAxis": "right",
+                      "label": "CPUCreditBalance low",
+                      "color": "#ff7f0e",
+                      "value": ${CPUCreditsLow}
+                    }
+                  ]
+                }
+              },
+              "type": "metric",
+              "view": "timeSeries",
+              "stacked": false,
+              "height": 6,
+              "width": 12,
+              "x": 0,
+              "y": 0
+            },
+            {
+              "properties": {
+                "metrics": [
+                    [ "AWS/ELB", "HTTPCode_ELB_5XX", "LoadBalancerName", "${Vertical}-${Environment}-${ServiceName}", { "yAxis": "right", "color": "#d62728", "period": 60 } ],
+                    [ ".", "HTTPCode_Backend_5XX", ".", ".", { "yAxis": "right", "color": "#ed8787", "period": 60 } ],
+                    [ ".", "HTTPCode_Backend_4XX", ".", ".", { "yAxis": "right", "color": "#ff7f0e", "period": 60 } ],
+                    [ ".", "HTTPCode_Backend_2XX", ".", ".", { "yAxis": "left", "color": "#2ca02c", "period": 60 } ]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "stat": "Sum",
+                "title": "ELB/BackEnd HTTP RC"
+              },
+              "type": "metric",
+              "view": "timeSeries",
+              "stacked": false,
+              "height": 6,
+              "width": 12,
+              "x": 12,
+              "y": 0
+            },
+            {
+              "properties": {
+                "view": "timeSeries",
+                "metrics": [
+                  [ "AWS/ELB", "HealthyHostCount", "LoadBalancerName", "${Vertical}-${Environment}-${ServiceName}", { "period": 60, "stat": "Maximum", "color": "#2ca02c" } ],
+                  [ ".", "UnHealthyHostCount", ".", ".", { "period": 60, "stat": "Maximum", "color": "#d62728" } ]
+                ],
+                "region": "${AWS::Region}",
+                "stat": "Maximum",
+                "title": "Instances",
+                "stacked": true,
+                "period": 60,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                },
+                "annotations": {
+                  "horizontal": [
+                    {
+                      "color": "#d62728",
+                      "label": "MinSize",
+                      "value": ${MinSize}
+                    },
+                    {
+                      "color": "#d62728",
+                      "label": "MaxSize",
+                      "value": ${MaxSize}
+                    }
+                  ]
+                }
+              },
+              "type": "metric",
+              "width": 12,
+              "height": 6,
+              "x": 0,
+              "y": 6
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "view": "timeSeries",
+                "stacked": false,
+                "metrics": [
+                  [ "AWS/ELB", "Latency", "LoadBalancerName", "${Vertical}-${Environment}-${ServiceName}", { "period": 60 } ],
+                  [ ".", "SurgeQueueLength", ".", ".", { "yAxis": "right", "period": 60 } ]
+                ],
+                "region": "eu-central-1",
+                "period": 60,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  },
+                  "right": {
+                    "min": 0
+                  }
+                }
+              }
+            }
+          ]
+        }
+
+
+  ###############################################################################
+  ### auto scaling ##############################################################
+  ###############################################################################
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: "ChangeInCapacity"
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: "310"
+      ScalingAdjustment: "1"
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: "ChangeInCapacity"
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: "1800"
+      ScalingAdjustment: "-1"
+
+  ###### alarms autoscaling ######
+
+  AutoScalingAlarmCPUCreditBalanceUp:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+      AlarmDescription: !Sub "CPU Credit Balance ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-autoscaling-up-CPU-CreditBalance"
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      EvaluationPeriods: 1
+      MetricName: CPUCreditBalance
+      Namespace: AWS/EC2
+      Period: 360
+      Statistic: Average
+      Threshold: !Ref CPUCreditsLow
+      TreatMissingData: missing
+
+  AutoScalingAlarmCPUUtilizationUp:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+      AlarmDescription: !Sub "CPU utilization ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-autoscaling-up-CPU-Utilization"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      EvaluationPeriods: 5
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 60
+      Statistic: Maximum
+      Threshold: !Ref CPUUtilizationHigh
+      TreatMissingData: missing
+
+  AutoScalingAlarmSurgeQueueLengthUp:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref ScaleUpPolicy
+      AlarmDescription: !Sub "Surge queue on Loadbalancer for ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-autoscaling-up-SurgeQueueLength"
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: LoadBalancerName
+          Value: !Ref ElasticLoadBalancer
+      EvaluationPeriods: 1
+      MetricName: SurgeQueueLength
+      Namespace: AWS/ELB
+      Period: 60
+      Statistic: Maximum
+      Threshold: 0
+      TreatMissingData: notBreaching
+
+  AutoScalingAlarmCPUUtilizationDown:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref ScaleDownPolicy
+      AlarmDescription: !Sub "CPU utilization ${Vertical}-${Environment}-${ServiceName}"
+      AlarmName: !Sub "${Vertical}-${Environment}-${ServiceName}-autoscaling-down-CPU-Utilization"
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+      EvaluationPeriods: 3
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 300
+      Statistic: Maximum
+      Threshold: !Ref CPUUtilizationLow
+      TreatMissingData: missing

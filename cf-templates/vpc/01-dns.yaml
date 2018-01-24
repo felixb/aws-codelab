@@ -163,22 +163,6 @@ Resources:
     Properties:
       Name: !Sub "${Environment}.${Vertical}.cloud.otto.de"
 
-  ###### Certificate ######
-  Certificate:
-    Type: "AWS::CertificateManager::Certificate"
-    Properties:
-      DomainName: !Sub "*.${Environment}.${Vertical}.cloud.otto.de"
-      DomainValidationOptions:
-        - DomainName: !Sub "*.${Environment}.${Vertical}.cloud.otto.de"
-          ValidationDomain: otto.de
-      Tags:
-        - Key: environment
-          Value: !Ref Environment
-        - Key: team
-          Value: !Ref TeamName
-        - Key: vertical
-          Value: !Ref Vertical
-
 Outputs:
   VPCId:
     Value: !Ref VPC
@@ -192,24 +176,6 @@ Outputs:
     Value: !Ref Environment
     Export:
       Name: !Sub "${AWS::StackName}-Environment"
-
-  Route53HostedZone:
-    Value: !Ref Route53HostedZone
-    Export:
-      Name: !Sub "${AWS::StackName}-HostedZoneId"
-  Route53HostedZoneName:
-    Value: !Sub "${Environment}.${Vertical}.cloud.otto.de"
-    Export:
-      Name: !Sub "${AWS::StackName}-HostedZoneName"
-  Route53HostedZoneNameServers:
-    Value: !Join [",", !GetAtt Route53HostedZone.NameServers]
-    Export:
-      Name: !Sub "${AWS::StackName}-HostedZoneNameServers"
-
-  CertificateId:
-    Value: !Ref Certificate
-    Export:
-      Name: !Sub "${AWS::StackName}-CertificateId"
 
   RouteTablePublicId:
     Value: !Ref RouteTablePublic
@@ -237,3 +203,16 @@ Outputs:
     Value: !Ref SubnetAz1cPublic
     Export:
       Name: !Sub "${AWS::StackName}-SubnetAz1cPublicId"
+
+  Route53HostedZone:
+    Value: !Ref Route53HostedZone
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedZoneId"
+  Route53HostedZoneName:
+    Value: !Sub "${Environment}.${Vertical}.cloud.otto.de"
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedZoneName"
+  Route53HostedZoneNameServers:
+    Value: !Join [",", !GetAtt Route53HostedZone.NameServers]
+    Export:
+      Name: !Sub "${AWS::StackName}-HostedZoneNameServers"
